@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+require('dotenv').config();
 
 const app = express();
 
@@ -19,6 +20,7 @@ app.post('/api/generate', async (req, res) => {
   }
 
   try {
+    console.log('GROQ_API_KEY', GROQ_API_KEY);
     const response = await axios.post(
       GROQ_API_URL,
       {
