@@ -1,0 +1,11 @@
+{
+  "name": "flashcard-api",
+  "version": "1.0.0",
+  "description": "Serverless API for generating language learning flashcards using Groq",
+  "scripts": {
+    "start": "vercel dev"
+  },
+  "dependencies": {
+    "groq-sdk": "^0.3.3"
+  }
+}
