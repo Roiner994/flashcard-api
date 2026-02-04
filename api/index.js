@@ -71,6 +71,63 @@ app.post('/api/generate', async (req, res) => {
   }
 });
 
+app.post('/api/challenge', async (req, res) => {
+  const { word, phrase } = req.body;
+
+  if (!word || !phrase) {
+    return res.status(400).json({ error: 'Both "word" and "phrase" are required' });
+  }
+
+  try {
+    const response = await axios.post(
+      GROQ_API_URL,
+      {
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          {
+            role: 'system',
+            content: `You are a strict but helpful language tutor. 
+            Evaluate the user's sentence based on their usage of the specific target word.
+            
+            Return a valid JSON object with the following fields:
+            - "score": integer (1-10), indicating how well the word was used.
+            - "feedback": string, a brief explanation of the score and if the word was used correctly.
+            - "improved_phrase": string, a better or corrected version of the sentence. If the original is perfect, improve it stylistically or simple return the original.
+
+            Ensure the response is ONLY valid JSON.`
+          },
+          {
+            role: 'user',
+            content: `Target word: "${word}"
+            User phrase: "${phrase}"`
+          }
+        ],
+        response_format: { type: 'json_object' }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${GROQ_API_KEY}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const resultData = response.data.choices[0]?.message?.content;
+
+    if (!resultData) {
+      throw new Error('No content received from Groq API');
+    }
+
+    res.json(JSON.parse(resultData));
+  } catch (error) {
+    console.error('Error calling Groq API for challenge:', error.response?.data || error.message);
+    res.status(500).json({ 
+      error: 'Failed to evaluate challenge', 
+      details: error.response?.data || error.message 
+    });
+  }
+});
+
 // Export the Express app
 module.exports = app;
 
