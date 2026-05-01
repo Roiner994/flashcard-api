@@ -146,6 +146,7 @@ app.get('/api/community/explore', checkSupabase, ensureCacheReady, async (req, r
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
+    const userId = req.query.user_id;
     const from = (page - 1) * limit;
     const to = from + limit - 1;
 
@@ -158,11 +159,24 @@ app.get('/api/community/explore', checkSupabase, ensureCacheReady, async (req, r
 
     if (error) throw error;
 
+    let likedDeckIds = new Set();
+    if (userId && decks.length > 0) {
+      const { data: likes, error: likesError } = await supabase
+        .from('deck_likes')
+        .select('deck_id')
+        .eq('user_id', userId)
+        .in('deck_id', decks.map(deck => deck.id));
+
+      if (likesError) throw likesError;
+      likedDeckIds = new Set((likes || []).map((like) => like.deck_id));
+    }
+
     // Enrich with full_name from cached auth metadata (O(1) per user)
     const enriched = decks.map(deck => {
       const authMeta = getAuthMeta(deck.user_id);
       return {
         ...deck,
+        liked_by_user: likedDeckIds.has(deck.id),
         profiles: {
           ...deck.profiles,
           full_name: authMeta.full_name || deck.profiles?.username || null,
@@ -187,25 +201,109 @@ app.get('/api/community/people', checkSupabase, ensureCacheReady, async (req, re
 
     const { data: people, error } = await supabase
       .from('profiles')
-      .select('id, username, avatar_url, current_streak')
+      .select(`
+        id,
+        username,
+        avatar_url,
+        current_streak,
+        public_decks:decks!inner(id)
+      `)
+      .eq('public_decks.is_public', true)
       .order('current_streak', { ascending: false })
       .range(from, to);
 
     if (error) throw error;
 
     // Enrich with full_name from cached auth metadata (O(1) per user)
-    const enriched = people.map(person => {
+    const enriched = people
+      .map(person => {
       const authMeta = getAuthMeta(person.id);
       return {
         ...person,
+        public_deck_count: Array.isArray(person.public_decks) ? person.public_decks.length : 0,
         full_name: authMeta.full_name || null,
         avatar_url: person.avatar_url || authMeta.avatar_url || null,
       };
-    });
+      })
+      .sort((a, b) =>
+        (b.current_streak - a.current_streak) ||
+        (b.public_deck_count - a.public_deck_count) ||
+        a.id.localeCompare(b.id)
+      );
 
     res.json(enriched);
   } catch (error) {
     console.error('Error in /api/community/people:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/community/person-decks', checkSupabase, ensureCacheReady, async (req, res) => {
+  const userId = req.query.user_id;
+  const viewerUserId = req.query.viewer_user_id;
+
+  if (!userId) return res.status(400).json({ error: 'user_id is required' });
+
+  try {
+    const { data: person, error: personError } = await supabase
+      .from('profiles')
+      .select(`
+        id,
+        username,
+        avatar_url,
+        current_streak,
+        public_decks:decks!inner(id, title, user_id, created_at, is_public, likes_count, downloads_count, tags)
+      `)
+      .eq('id', userId)
+      .eq('public_decks.is_public', true)
+      .single();
+
+    if (personError || !person) {
+      return res.status(404).json({ error: 'Person with public decks not found' });
+    }
+
+    const authMeta = getAuthMeta(person.id);
+    const decks = person.public_decks || [];
+
+    let likedDeckIds = new Set();
+    if (viewerUserId && decks.length > 0) {
+      const { data: likes, error: likesError } = await supabase
+        .from('deck_likes')
+        .select('deck_id')
+        .eq('user_id', viewerUserId)
+        .in('deck_id', decks.map((deck) => deck.id));
+
+      if (likesError) throw likesError;
+      likedDeckIds = new Set((likes || []).map((like) => like.deck_id));
+    }
+
+    res.json({
+      person: {
+        id: person.id,
+        username: person.username,
+        full_name: authMeta.full_name || null,
+        avatar_url: person.avatar_url || authMeta.avatar_url || null,
+        current_streak: person.current_streak,
+        public_deck_count: decks.length,
+      },
+      decks: decks
+        .sort((a, b) =>
+          ((b.likes_count || 0) - (a.likes_count || 0)) ||
+          ((b.downloads_count || 0) - (a.downloads_count || 0)) ||
+          a.title.localeCompare(b.title)
+        )
+        .map((deck) => ({
+          ...deck,
+          liked_by_user: likedDeckIds.has(deck.id),
+          profiles: {
+            username: person.username || null,
+            full_name: authMeta.full_name || null,
+            avatar_url: person.avatar_url || authMeta.avatar_url || null,
+          },
+        })),
+    });
+  } catch (error) {
+    console.error('Error in /api/community/person-decks:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -223,6 +321,133 @@ app.post('/api/community/like', checkSupabase, async (req, res) => {
     res.json({ liked: data });
   } catch (error) {
     console.error('Error in /api/community/like:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/community/deck-preview', checkSupabase, ensureCacheReady, async (req, res) => {
+  const deckId = req.query.deck_id;
+  if (!deckId) return res.status(400).json({ error: 'deck_id is required' });
+
+  try {
+    const { data: deck, error: deckError } = await supabase
+      .from('decks')
+      .select('*, profiles:user_id(username, avatar_url)')
+      .eq('id', deckId)
+      .eq('is_public', true)
+      .single();
+
+    if (deckError || !deck) {
+      return res.status(404).json({ error: 'Public deck not found' });
+    }
+
+    const { data: cards, error: cardsError } = await supabase
+      .from('cards')
+      .select('id, front_word, definition, spanish_meaning, phonetic, examples, example_sentence')
+      .eq('deck_id', deckId)
+      .order('created_at', { ascending: true });
+
+    if (cardsError) throw cardsError;
+
+    const authMeta = getAuthMeta(deck.user_id);
+    res.json({
+      deck: {
+        ...deck,
+        profiles: {
+          ...deck.profiles,
+          full_name: authMeta.full_name || deck.profiles?.username || null,
+          avatar_url: deck.profiles?.avatar_url || authMeta.avatar_url || null,
+        },
+      },
+      cards: cards || [],
+    });
+  } catch (error) {
+    console.error('Error in /api/community/deck-preview:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/community/import', checkSupabase, async (req, res) => {
+  const { deck_id, user_id, card_ids, deck_title } = req.body;
+
+  if (!deck_id || !user_id) {
+    return res.status(400).json({ error: 'deck_id and user_id required' });
+  }
+
+  if (!Array.isArray(card_ids) || card_ids.length === 0) {
+    return res.status(400).json({ error: 'card_ids must be a non-empty array' });
+  }
+
+  try {
+    const { data: originalDeck, error: deckError } = await supabase
+      .from('decks')
+      .select('*')
+      .eq('id', deck_id)
+      .eq('is_public', true)
+      .single();
+
+    if (deckError || !originalDeck) {
+      return res.status(404).json({ error: 'Public deck not found' });
+    }
+
+    const { data: cards, error: cardsError } = await supabase
+      .from('cards')
+      .select('*')
+      .eq('deck_id', deck_id)
+      .in('id', card_ids);
+
+    if (cardsError) throw cardsError;
+
+    if (!cards || cards.length === 0) {
+      return res.status(400).json({ error: 'No matching cards found to import' });
+    }
+
+    const normalizedDeckTitle = typeof deck_title === 'string' && deck_title.trim()
+      ? deck_title.trim()
+      : originalDeck.title;
+
+    const { data: newDeck, error: newDeckError } = await supabase
+      .from('decks')
+      .insert({
+        title: normalizedDeckTitle,
+        user_id,
+        is_public: false,
+        likes_count: 0,
+        downloads_count: 0,
+        tags: originalDeck.tags,
+      })
+      .select()
+      .single();
+
+    if (newDeckError) throw newDeckError;
+
+    const newCards = cards.map((c) => ({
+      deck_id: newDeck.id,
+      front_word: c.front_word,
+      definition: c.definition,
+      spanish_meaning: c.spanish_meaning,
+      phonetic: c.phonetic,
+      examples: c.examples,
+      example_sentence: c.example_sentence,
+      status: 'new',
+      interval: 0,
+      ease_factor: 2.5,
+    }));
+
+    const { error: insertCardsError } = await supabase
+      .from('cards')
+      .insert(newCards);
+
+    if (insertCardsError) throw insertCardsError;
+
+    await supabase.rpc('increment_downloads', { p_deck_id: deck_id });
+
+    res.json({
+      new_deck_id: newDeck.id,
+      imported_count: newCards.length,
+    });
+  } catch (error) {
+    console.error('Error in /api/community/import:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
