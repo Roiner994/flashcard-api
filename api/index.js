@@ -343,7 +343,7 @@ app.get('/api/community/deck-preview', checkSupabase, ensureCacheReady, async (r
 
     const { data: cards, error: cardsError } = await supabase
       .from('cards')
-      .select('id, front_word, definition, spanish_meaning, phonetic, examples, example_sentence')
+      .select('id, front_word, definition, spanish_meaning, phonetic, examples, image_url, audio_url, audio_source, example_sentence')
       .eq('deck_id', deckId)
       .order('created_at', { ascending: true });
 
@@ -428,6 +428,9 @@ app.post('/api/community/import', checkSupabase, async (req, res) => {
       spanish_meaning: c.spanish_meaning,
       phonetic: c.phonetic,
       examples: c.examples,
+      image_url: c.image_url || null,
+      audio_url: c.audio_url || null,
+      audio_source: c.audio_source || 'tts',
       example_sentence: c.example_sentence,
       status: 'new',
       interval: 0,
@@ -492,6 +495,9 @@ app.post('/api/community/fork', checkSupabase, async (req, res) => {
         spanish_meaning: c.spanish_meaning,
         phonetic: c.phonetic,
         examples: c.examples,
+        image_url: c.image_url || null,
+        audio_url: c.audio_url || null,
+        audio_source: c.audio_source || 'tts',
         example_sentence: c.example_sentence,
         status: 'new',
         interval: 0,
